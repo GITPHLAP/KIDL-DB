@@ -111,7 +111,7 @@ CREATE TABLE transactions_test (
 -- DROP TABLE "plans";
 
 CREATE TABLE "plans" (
-	id int8 DEFAULT nextval('forecasts_id_seq'::regclass) NOT NULL,
+	id serial8 NOT NULL,
 	"year" int4 NOT NULL,
 	"type" public."trans_type" NOT NULL,
 	category_id int4 NULL,
