@@ -1,6 +1,3 @@
--- DROP SCHEMA public;
-
-CREATE SCHEMA public AUTHORIZATION postgres;
 
 -- DROP TYPE public."trans_type";
 
