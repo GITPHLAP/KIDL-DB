@@ -5,6 +5,145 @@ CREATE TYPE public."trans_type" AS ENUM (
 	'expenses',
 	'income');
 
+-- DROP FUNCTION public.getcategory(varchar, bool);
+
+
+CREATE OR REPLACE FUNCTION public.getcategory(_description character varying, is_expenses boolean)
+ RETURNS integer
+ LANGUAGE plpgsql
+ IMMUTABLE
+AS $function$
+
+declare 
+    category_id int;
+   temp_cat int;
+begin
+   	category_id = NULL;
+   SELECT tc.id
+   INTO category_id
+   FROM transaction_categories tc 
+   LEFT JOIN transaction_categories_mapping tcm 
+   	ON tc.id = tcm.category_id 
+WHERE LOWER(tc.description) ILIKE _description
+	OR _description ILIKE ('%'|| LOWER(tcm.mapping_value) || '%');
+        
+RETURN category_id;
+end;
+$function$
+;
+
+-- DROP FUNCTION public.getlatestaccountingdate();
+
+CREATE OR REPLACE FUNCTION public.getlatestaccountingdate()
+ RETURNS date
+ LANGUAGE plpgsql
+ IMMUTABLE
+AS $function$
+DECLARE 
+    accountingDate date;
+BEGIN
+    SELECT MAX(accounting)
+    INTO accountingDate
+    FROM transactions;
+    CASE 
+        WHEN accountingDate IS NULL
+            THEN RETURN '1900-01-01';
+        ELSE 
+            RETURN accountingDate;
+    END CASE;
+END;
+$function$
+;
+
+-- DROP FUNCTION public.gettype(float8);
+
+CREATE OR REPLACE FUNCTION public.gettype(amount double precision)
+ RETURNS trans_type
+ LANGUAGE plpgsql
+ IMMUTABLE
+AS $function$
+declare 
+    type varchar(255);
+begin
+    CASE
+        WHEN amount > 0 
+            THEN type = 'income'::public.trans_type;
+        ELSE 
+            type = 'expenses'::public.trans_type;
+        END CASE;
+
+return type;
+end;
+$function$
+;
+
+-- DROP PROCEDURE public.inserttransactions(date, numeric, int8, int8, varchar, varchar, numeric, varchar, varchar, varchar, bool);
+
+CREATE OR REPLACE PROCEDURE public.inserttransactions(IN _accounting date, IN _amount numeric, IN _sender bigint, IN _recipient bigint, IN _name character varying, IN _description character varying, IN _balance numeric, IN _currency character varying, IN _aligned character varying, IN _user_category character varying, IN _reserved boolean)
+ LANGUAGE plpgsql
+AS $procedure$
+begin
+    IF (_accounting >= getLatestAccountingDate() AND _accounting IS NOT null) THEN -- Only inserting new data or update the accounting
+		INSERT INTO transactions as t (accounting, amount, sender, recipient, name, description, balance, currency, aligned, user_category, reserved)
+		VALUES (_accounting, _amount, _sender, _recipient, _name, _description, _balance, _currency, _aligned, _user_category, _reserved)
+		ON CONFLICT (amount, sender, recipient, name, description, balance, currency)
+			DO UPDATE SET (reserved, accounting) = (_reserved, _accounting)
+			WHERE t.accounting IS NULL;
+    END IF;
+    commit;
+end;
+$procedure$
+;
+
+-- DROP PROCEDURE public.inserttransactions_old(date, numeric, int8, int8, varchar, varchar, numeric, varchar, varchar, varchar, bool);
+
+CREATE OR REPLACE PROCEDURE public.inserttransactions_old(IN _accounting date, IN _amount numeric, IN _sender bigint, IN _recipient bigint, IN _name character varying, IN _description character varying, IN _balance numeric, IN _currency character varying, IN _aligned character varying, IN _user_category character varying, IN _reserved boolean)
+ LANGUAGE plpgsql
+AS $procedure$
+begin
+    IF (_accounting >= getLatestAccountingDate() OR _accounting is null) AND NOT EXISTS(SELECT 1 FROM transactions t WHERE t.amount = _amount AND
+            t.description = _description AND t.reserved = _reserved AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance) THEN
+        IF EXISTS(SELECT id FROM transactions t WHERE t.accounting is null AND t.amount = _amount AND
+            t.description = _description AND t.reserved = TRUE AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance) THEN
+            UPDATE transactions
+                SET reserved = _reserved,
+                    accounting = _accounting,
+					balance = _balance
+            WHERE id = (SELECT id FROM transactions t WHERE t.accounting is null AND t.amount = _amount AND
+            t.description = _description AND t.user_category = _user_category AND t.reserved = TRUE AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance);
+        ELSE
+            INSERT INTO transactions(accounting, amount, sender, recipient, name, description, balance, currency, aligned, user_category, reserved)
+            VALUES (_accounting, _amount, _sender, _recipient, _name, _description, _balance, _currency, _aligned, _user_category, _reserved); 
+            -- ON CONFLICT ON CONSTRAINT transactions_accounting_amount_description_balance_user_cat_key
+            --     DO NOTHING;
+        END IF;
+    END IF;
+    commit;
+end;
+$procedure$
+;
+
+-- DROP FUNCTION public.process_transactions_audit();
+
+CREATE OR REPLACE FUNCTION public.process_transactions_audit()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+    BEGIN
+        IF (TG_OP = 'DELETE') THEN
+            INSERT INTO transactions_audit SELECT 'D', now(), ROW(OLD.*), NULL, current_query();
+            RETURN OLD;
+        ELSIF (TG_OP = 'UPDATE') THEN
+            INSERT INTO transactions_audit SELECT 'U', now(), ROW(OLD.*), ROW(NEW.*), current_query();
+            RETURN NEW;
+        ELSIF (TG_OP = 'INSERT') THEN
+            INSERT INTO transactions_audit SELECT 'I', now(), NULL, ROW(NEW.*), current_query();
+            RETURN NEW;
+        END IF;
+        RETURN NULL; -- result is ignored since this is an AFTER trigger
+    END;
+$function$
+;
 -- Drop table
 
 -- DROP TABLE api_statistics;
@@ -182,6 +321,28 @@ OR UPDATE ON
 public.transactions FOR EACH ROW EXECUTE FUNCTION process_transactions_audit();
 
 
+-- public.transactions_view source
+
+CREATE OR REPLACE VIEW transactions_view
+AS SELECT t.id,
+        CASE
+            WHEN t.user_accounting IS NULL THEN t.accounting
+            ELSE t.user_accounting
+        END AS accounting,
+    t.amount,
+    t.sender,
+    t.recipient,
+    t.name,
+    t.description,
+    t.balance,
+    t.currency,
+    t.aligned,
+    t.reserved,
+    COALESCE(t.user_category_id, getcategory(t.description, t.amount < 0::numeric), '-1'::integer) AS category_id,
+    gettype(t.amount::double precision) AS type
+   FROM transactions t
+     LEFT JOIN transaction_categories tc ON t.user_category_id = tc.id;
+
 -- public.monthly_overview_by_category source
 
 CREATE OR REPLACE VIEW monthly_overview_by_category
@@ -213,165 +374,6 @@ AS WITH pivot_plans AS (
      LEFT JOIN transaction_categories tc ON pf.category_id = tc.id OR ac.category_id = tc.id;
 
 
--- public.transactions_view source
-
-CREATE OR REPLACE VIEW transactions_view
-AS SELECT t.id,
-        CASE
-            WHEN t.user_accounting IS NULL THEN t.accounting
-            ELSE t.user_accounting
-        END AS accounting,
-    t.amount,
-    t.sender,
-    t.recipient,
-    t.name,
-    t.description,
-    t.balance,
-    t.currency,
-    t.aligned,
-    t.reserved,
-    COALESCE(t.user_category_id, getcategory(t.description, t.amount < 0::numeric), '-1'::integer) AS category_id,
-    gettype(t.amount::double precision) AS type
-   FROM transactions t
-     LEFT JOIN transaction_categories tc ON t.user_category_id = tc.id;
 
 
 
--- DROP FUNCTION public.getcategory(varchar, bool);
-
-CREATE OR REPLACE FUNCTION public.getcategory(_description character varying, is_expenses boolean)
- RETURNS integer
- LANGUAGE plpgsql
- IMMUTABLE
-AS $function$
-
-declare 
-    category_id int;
-   temp_cat int;
-begin
-   	category_id = NULL;
-   SELECT tc.id
-   INTO category_id
-   FROM transaction_categories tc 
-   LEFT JOIN transaction_categories_mapping tcm 
-   	ON tc.id = tcm.category_id 
-WHERE LOWER(tc.description) ILIKE _description
-	OR _description ILIKE ('%'|| LOWER(tcm.mapping_value) || '%');
-        
-RETURN category_id;
-end;
-$function$
-;
-
--- DROP FUNCTION public.getlatestaccountingdate();
-
-CREATE OR REPLACE FUNCTION public.getlatestaccountingdate()
- RETURNS date
- LANGUAGE plpgsql
- IMMUTABLE
-AS $function$
-DECLARE 
-    accountingDate date;
-BEGIN
-    SELECT MAX(accounting)
-    INTO accountingDate
-    FROM transactions;
-    CASE 
-        WHEN accountingDate IS NULL
-            THEN RETURN '1900-01-01';
-        ELSE 
-            RETURN accountingDate;
-    END CASE;
-END;
-$function$
-;
-
--- DROP FUNCTION public.gettype(float8);
-
-CREATE OR REPLACE FUNCTION public.gettype(amount double precision)
- RETURNS trans_type
- LANGUAGE plpgsql
- IMMUTABLE
-AS $function$
-declare 
-    type varchar(255);
-begin
-    CASE
-        WHEN amount > 0 
-            THEN type = 'income'::public.trans_type;
-        ELSE 
-            type = 'expenses'::public.trans_type;
-        END CASE;
-
-return type;
-end;
-$function$
-;
-
--- DROP PROCEDURE public.inserttransactions(date, numeric, int8, int8, varchar, varchar, numeric, varchar, varchar, varchar, bool);
-
-CREATE OR REPLACE PROCEDURE public.inserttransactions(IN _accounting date, IN _amount numeric, IN _sender bigint, IN _recipient bigint, IN _name character varying, IN _description character varying, IN _balance numeric, IN _currency character varying, IN _aligned character varying, IN _user_category character varying, IN _reserved boolean)
- LANGUAGE plpgsql
-AS $procedure$
-begin
-    IF (_accounting >= getLatestAccountingDate() AND _accounting IS NOT null) THEN -- Only inserting new data or update the accounting
-		INSERT INTO transactions as t (accounting, amount, sender, recipient, name, description, balance, currency, aligned, user_category, reserved)
-		VALUES (_accounting, _amount, _sender, _recipient, _name, _description, _balance, _currency, _aligned, _user_category, _reserved)
-		ON CONFLICT (amount, sender, recipient, name, description, balance, currency)
-			DO UPDATE SET (reserved, accounting) = (_reserved, _accounting)
-			WHERE t.accounting IS NULL;
-    END IF;
-    commit;
-end;
-$procedure$
-;
-
--- DROP PROCEDURE public.inserttransactions_old(date, numeric, int8, int8, varchar, varchar, numeric, varchar, varchar, varchar, bool);
-
-CREATE OR REPLACE PROCEDURE public.inserttransactions_old(IN _accounting date, IN _amount numeric, IN _sender bigint, IN _recipient bigint, IN _name character varying, IN _description character varying, IN _balance numeric, IN _currency character varying, IN _aligned character varying, IN _user_category character varying, IN _reserved boolean)
- LANGUAGE plpgsql
-AS $procedure$
-begin
-    IF (_accounting >= getLatestAccountingDate() OR _accounting is null) AND NOT EXISTS(SELECT 1 FROM transactions t WHERE t.amount = _amount AND
-            t.description = _description AND t.reserved = _reserved AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance) THEN
-        IF EXISTS(SELECT id FROM transactions t WHERE t.accounting is null AND t.amount = _amount AND
-            t.description = _description AND t.reserved = TRUE AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance) THEN
-            UPDATE transactions
-                SET reserved = _reserved,
-                    accounting = _accounting,
-					balance = _balance
-            WHERE id = (SELECT id FROM transactions t WHERE t.accounting is null AND t.amount = _amount AND
-            t.description = _description AND t.user_category = _user_category AND t.reserved = TRUE AND t.sender = _sender AND t.recipient = _recipient AND t.balance = _balance);
-        ELSE
-            INSERT INTO transactions(accounting, amount, sender, recipient, name, description, balance, currency, aligned, user_category, reserved)
-            VALUES (_accounting, _amount, _sender, _recipient, _name, _description, _balance, _currency, _aligned, _user_category, _reserved); 
-            -- ON CONFLICT ON CONSTRAINT transactions_accounting_amount_description_balance_user_cat_key
-            --     DO NOTHING;
-        END IF;
-    END IF;
-    commit;
-end;
-$procedure$
-;
-
--- DROP FUNCTION public.process_transactions_audit();
-
-CREATE OR REPLACE FUNCTION public.process_transactions_audit()
- RETURNS trigger
- LANGUAGE plpgsql
-AS $function$
-    BEGIN
-        IF (TG_OP = 'DELETE') THEN
-            INSERT INTO transactions_audit SELECT 'D', now(), ROW(OLD.*), NULL, current_query();
-            RETURN OLD;
-        ELSIF (TG_OP = 'UPDATE') THEN
-            INSERT INTO transactions_audit SELECT 'U', now(), ROW(OLD.*), ROW(NEW.*), current_query();
-            RETURN NEW;
-        ELSIF (TG_OP = 'INSERT') THEN
-            INSERT INTO transactions_audit SELECT 'I', now(), NULL, ROW(NEW.*), current_query();
-            RETURN NEW;
-        END IF;
-        RETURN NULL; -- result is ignored since this is an AFTER trigger
-    END;
-$function$
-;
