@@ -1,0 +1,95 @@
+name: Flyway Conflict Check
+on:
+  pull_request:
+    branches:
+      - develop
+      - master
+    paths:
+      - 'scripts/**'
+
+jobs:
+  check-conflict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    #FILE FORMAT CHECK
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    - name: Check file format # Check if the file format is correct for Flyway: VX.X__description.sql or VX.XX__description or VX.XXX__description.sql
+      run: |
+          # Find all files within the flyway/ directory not following the naming convention
+          incorrect_files=$(find flyway/ -maxdepth 1 -type f \( ! -name "V*.sql" -or ! -name "*.sql" \))
+
+          # Check if the incorrect_files variable is non-empty
+          if [[ -n "$incorrect_files" ]]; then
+            echo "Error: All files should start with V and end with '.sql'."
+            echo "Incorrect files:"
+            echo "$incorrect_files"
+            exit 1
+          else
+            echo "No mismatches detected."
+          fi
+
+          # Find all SQL files that do not match the two-segment versioning scheme
+          incorrect_files_two_segment=$(find flyway/ -type f -name "V*.sql" | grep -v -E 'V[0-9]+\.[0-9]+__[a-zA-Z0-9_]+\.sql')
+          correct_files_two_segment=$(find flyway/ -type f -name "V*.sql" | grep -E 'V[0-9]+\.[0-9]+__[a-zA-Z0-9_]+\.sql')
+
+          echo "---- incorrect_files_two_segment ----"
+          echo "$incorrect_files_two_segment"
+          # Find all SQL files that do not match the three-segment versioning scheme
+          incorrect_files_three_segment=$(find flyway/ -type f -name "V*.sql" | grep -v -E 'V[0-9]+\.[0-9]+\.[0-9]+__[a-zA-Z0-9_]+\.sql')
+          correct_files_three_segment=$(find flyway/ -type f -name "V*.sql" | grep -E 'V[0-9]+\.[0-9]+\.[0-9]+__[a-zA-Z0-9_]+\.sql')
+
+          echo "---- incorrect_files_three_segment ----"
+          echo "$incorrect_files_three_segment"
+
+          count_incorrect_files_two_segment=$(echo "$incorrect_files_two_segment" | grep -c .)
+          count_correct_files_two_segment=$(echo "$correct_files_two_segment" | grep -c .)
+          
+          count_incorrect_files_three_segment=$(echo "$incorrect_files_three_segment" | grep -c .)
+          count_correct_files_three_segment=$(echo "$correct_files_three_segment" | grep -c .)
+          
+          # Compare the counts
+          if [[ $count_incorrect_files_two_segment -ne $count_correct_files_three_segment ]] || [[ $count_incorrect_files_three_segment -ne $count_correct_files_two_segment ]]; then
+            echo "Error: Mismatch detected between the sets of files."
+            exit 1
+          else
+            echo "No mismatches detected."
+          fi
+
+    #VERSION CONFLICT CHECK
+    - uses: actions/checkout@v4
+      with:
+        ref: develop
+    - name: List Flyway files in develop
+      run: find flyway/ -type f -name "V*.sql" > develop_files.txt
+    - name: Upload develop_files.txt as an artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: develop-files
+        path: develop_files.txt
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    - name: Download develop_files.txt artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: develop-files
+    - name: List Flyway files in PR
+      run: find flyway/ -type f -name "V*.sql" > pr_files.txt
+    - name: Find duplicate Flyway versions in PR
+      run: |
+        # Extract version numbers from filenames in PR
+        sed -E 's/flyway\/V([0-9]+\.[0-9]+)__.*/\1/' pr_files.txt | sort > sorted_pr_versions.txt
+        
+        # Find duplicates by looking for repeated lines
+        uniq -d sorted_pr_versions.txt > duplicate_versions.txt
+        
+        if [[ -s duplicate_versions.txt ]]; then
+          echo "Conflict in Flyway migration file versions detected:"
+          cat duplicate_versions.txt
+          exit 1
+        else
+          echo "No version conflict detected in PR."
+        fi
