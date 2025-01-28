@@ -10,7 +10,6 @@ on:
 jobs:
   check-conflict:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
     #FILE FORMAT CHECK
     - uses: actions/checkout@v4
