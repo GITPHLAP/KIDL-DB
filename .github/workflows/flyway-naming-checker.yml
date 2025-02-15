@@ -64,7 +64,7 @@ jobs:
     - name: List Flyway files in develop
       run: find flyway/ -type f -name "V*.sql" > develop_files.txt
     - name: Upload develop_files.txt as an artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: develop-files
         path: develop_files.txt
