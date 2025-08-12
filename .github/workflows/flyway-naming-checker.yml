@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     #FILE FORMAT CHECK
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ github.head_ref }}
     - name: Check file format # Check if the file format is correct for Flyway: VX.X__description.sql or VX.XX__description or VX.XXX__description.sql
@@ -63,7 +63,7 @@ jobs:
           fi
 
     #VERSION CONFLICT CHECK
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: develop
     - name: List Flyway files in develop
@@ -73,7 +73,7 @@ jobs:
       with:
         name: develop-files
         path: develop_files.txt
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ github.head_ref }}
     - name: Download develop_files.txt artifact
