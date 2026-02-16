@@ -1,4 +1,4 @@
-FROM redgate/flyway:12.0.0-alpine 
+FROM redgate/flyway:12.0.1-alpine 
 
 COPY ./scripts /flyway/sql
 
